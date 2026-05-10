@@ -377,6 +377,7 @@ class ContextCompressor(ContextEngine):
         self._last_aux_model_failure_model = None
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
+        self._last_ineffective_compression_time = 0.0  # for anti-thrash cooldown (fixes #14694)
         self._summary_failure_cooldown_until = 0.0  # transient errors must not block a fresh session
 
     def update_model(
@@ -484,6 +485,7 @@ class ContextCompressor(ContextEngine):
         # Anti-thrashing: track whether last compression was effective
         self._last_compression_savings_pct: float = 100.0
         self._ineffective_compression_count: int = 0
+        self._last_ineffective_compression_time: float = 0.0  # for anti-thrash cooldown (fixes #14694)
         self._summary_failure_cooldown_until: float = 0.0
         self._last_summary_error: Optional[str] = None
         # When summary generation fails and a static fallback is inserted,
@@ -514,6 +516,8 @@ class ContextCompressor(ContextEngine):
         if tokens < self.threshold_tokens:
             return False
         # Anti-thrashing: back off if recent compressions were ineffective
+        # With cooldown recovery (fixes #14694): after the cooldown
+        # expires, reset the counter and re-evaluate.
         if self._ineffective_compression_count >= 2:
             if self._ineffective_compression_count == 2:
                 self._last_ineffective_compression_time = time.monotonic()
@@ -673,6 +677,9 @@ class ContextCompressor(ContextEngine):
             if not isinstance(content, str):
                 continue
             if not content or content == _PRUNED_TOOL_PLACEHOLDER:
+                continue
+            # Skip already-deduplicated or previously-summarized results
+            if content.startswith("[Duplicate tool output"):
                 continue
             # Only prune if the content is substantial (>200 chars)
             if len(content) > 200:
@@ -1411,8 +1418,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if not self.quiet_mode:
                 logger.warning(
                     "Cannot compress: only %d messages (need > %d)",
-                    n_messages,
-                    _min_for_compress,
+                    n_messages, _min_for_compress,
                 )
             return messages
 
